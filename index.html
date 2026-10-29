@@ -23,6 +23,7 @@ import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+import { StereoEffect } from 'three/addons/effects/StereoEffect.js';
 
 // ---------- Renderer / scene / camera ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -31,7 +32,8 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.xr.enabled = true;
 document.body.appendChild(renderer.domElement);
-document.body.appendChild(VRButton.createButton(renderer));
+const vrButton = VRButton.createButton(renderer);
+document.body.appendChild(vrButton);
 
 const scene = new THREE.Scene();
 
@@ -469,13 +471,15 @@ function createHuman({ skin = 0xe0ac86, tee = 0xf2efe6, jacket = 0x16120f, pants
 
   // Torso (white tee), neck, head
   part(new THREE.CapsuleGeometry(0.17, 0.35, 4, 16), tee, 0, 1.2, 0).scale.z = 0.65;
-  part(new THREE.CylinderGeometry(0.05, 0.06, 0.1, 12), skin, 0, 1.52, 0);
+  const neck = part(new THREE.CylinderGeometry(0.05, 0.06, 0.1, 12), skin, 0, 1.52, 0);
   const head = part(new THREE.SphereGeometry(0.11, 24, 16), skin, 0, 1.65, 0);
   head.scale.set(0.9, 1.1, 1);
-  part(new THREE.SphereGeometry(0.115, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.55), hair, 0, 1.67, -0.01);
+  const hairParts = [part(new THREE.SphereGeometry(0.115, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.55), hair, 0, 1.67, -0.01)];
   if (longHair) {
-    part(new THREE.CapsuleGeometry(0.11, 0.2, 4, 12), hair, 0, 1.52, -0.075).scale.set(1, 1, 0.55); // back
-    for (const side of [-1, 1]) part(new THREE.CapsuleGeometry(0.03, 0.14, 4, 8), hair, side * 0.11, 1.57, 0.0); // front locks
+    const back = part(new THREE.CapsuleGeometry(0.11, 0.2, 4, 12), hair, 0, 1.52, -0.075);
+    back.scale.set(1, 1, 0.55);
+    hairParts.push(back);
+    for (const side of [-1, 1]) hairParts.push(part(new THREE.CapsuleGeometry(0.03, 0.14, 4, 8), hair, side * 0.11, 1.57, 0.0)); // front locks
   }
 
   // Sunglasses
@@ -540,7 +544,7 @@ function createHuman({ skin = 0xe0ac86, tee = 0xf2efe6, jacket = 0x16120f, pants
   ];
   for (const [leg, w, h, y, x] of rips) part(new THREE.BoxGeometry(w, h, 0.01), skin, x, y, 0.062, leg);
 
-  human.userData = { armL, armR, legL, legR };
+  human.userData = { armL, armR, legL, legR, headParts: [neck, head, ...hairParts] }; // head parts get hidden in first person
   human.scale.set(width * height / 1.75, height / 1.75, width * height / 1.75);
   return human;
 }
@@ -599,23 +603,305 @@ renderer.domElement.addEventListener('pointerdown', (e) => {
   if (hit) hit.object.material.color.setHex(Math.random() * 0xffffff);
 });
 
+// ---------- Phone fallback (gyro look-around + optional Cardboard split screen) ----------
+// For devices without WebXR VR (e.g. phones in Safari or the Mozilla WebXR Viewer). Starts on stage, like VR.
+const phone = { active: false, stereo: false, haveGyro: false, yaw0: null, dragYaw: 0, dragPitch: 0, gyro: { alpha: 0, beta: 0, gamma: 0 } };
+const stereoEffect = new StereoEffect(renderer);
+stereoEffect.setSize(window.innerWidth, window.innerHeight);
+
+const _zee = new THREE.Vector3(0, 0, 1), _upAxis = new THREE.Vector3(0, 1, 0), _rightAxis = new THREE.Vector3(1, 0, 0);
+const _euler = new THREE.Euler(), _qFix = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
+const _qDev = new THREE.Quaternion(), _qYaw = new THREE.Quaternion(), _qPitch = new THREE.Quaternion(), _qScreen = new THREE.Quaternion();
+
+window.addEventListener('deviceorientation', (e) => {
+  if (!phone.active || e.alpha === null) return;
+  phone.haveGyro = true;
+  phone.gyro = { alpha: e.alpha, beta: e.beta, gamma: e.gamma };
+});
+
+function updatePhoneCamera() {
+  const rad = THREE.MathUtils.degToRad;
+  if (phone.haveGyro) {
+    const screenAngle = rad(screen.orientation ? screen.orientation.angle : (window.orientation || 0));
+    _euler.set(rad(phone.gyro.beta), rad(phone.gyro.alpha), -rad(phone.gyro.gamma), 'YXZ');
+    _qDev.setFromEuler(_euler).multiply(_qFix).multiply(_qScreen.setFromAxisAngle(_zee, -screenAngle));
+    if (phone.yaw0 === null) phone.yaw0 = _euler.setFromQuaternion(_qDev, 'YXZ').y;
+  } else {
+    _qDev.identity();
+  }
+  // Anchor the first heading so the player starts facing the crowd (+z), then add drag offsets.
+  _qYaw.setFromAxisAngle(_upAxis, Math.PI - (phone.yaw0 || 0) + phone.dragYaw);
+  _qPitch.setFromAxisAngle(_rightAxis, phone.dragPitch);
+  camera.quaternion.copy(_qYaw).multiply(_qDev).multiply(_qPitch);
+}
+
+// Drag to look (works alongside the gyro, and on its own if there's no sensor or permission is denied)
+let dragging = null;
+renderer.domElement.addEventListener('pointerdown', (e) => { if (phone.active) dragging = { x: e.clientX, y: e.clientY }; });
+window.addEventListener('pointerup', () => { dragging = null; });
+window.addEventListener('pointermove', (e) => {
+  if (!phone.active || !dragging) return;
+  phone.dragYaw += (e.clientX - dragging.x) * 0.005;
+  phone.dragPitch = THREE.MathUtils.clamp(phone.dragPitch + (e.clientY - dragging.y) * 0.005, -1.2, 1.2);
+  dragging = { x: e.clientX, y: e.clientY };
+});
+
+async function startPhone() {
+  // iOS asks for motion-sensor permission, and only inside a tap handler
+  if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    try { await DeviceOrientationEvent.requestPermission(); } catch (e) { /* denied: drag-to-look still works */ }
+  }
+  stopPlay();
+  Object.assign(phone, { active: true, haveGyro: false, yaw0: null, dragYaw: 0, dragPitch: 0 });
+  controls.enabled = false;
+  camera.position.set(0, STAGE.h + 1.7, STAGE.zc + STAGE.d / 2 - 1.8);
+  refreshPhoneUI();
+}
+
+function stopPhone() {
+  if (!phone.active) return;
+  setStereo(false);
+  phone.active = false;
+  controls.enabled = true;
+  camera.position.set(0, 3.2, 4);
+  controls.update(); // re-aim the orbit camera at its target
+  refreshPhoneUI();
+}
+
+function setStereo(on) {
+  phone.stereo = on;
+  if (on) {
+    // Cardboard viewers are used in landscape, full screen; both calls can be refused, which is fine
+    try { document.documentElement.requestFullscreen(); } catch (e) { /* ignore */ }
+    try { screen.orientation.lock('landscape').catch(() => {}); } catch (e) { /* ignore */ }
+  } else if (document.fullscreenElement) {
+    document.exitFullscreen();
+  }
+  stereoEffect.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+// ---------- Playable character: first person as the blue-haired performer ----------
+// PC: WASD / arrow keys to move, mouse to look (click to capture the pointer), Shift to run.
+// Phone: left on-screen joystick to move, drag anywhere else to look.
+const COARSE = window.matchMedia('(pointer: coarse)').matches; // touch-first device -> joystick instead of keyboard
+const EYE_HEIGHT = 1.68;
+const PLAYER_RADIUS = 0.3;
+const play = { active: false, heading: 0, pitch: 0, moveX: 0, moveY: 0, walkPhase: 0, swingAmp: 0, keys: new Set() };
+
+// Things on stage the player can't walk through: [xMin, xMax, zMin, zMax]
+const obstacles = [
+  [-1.6, 1.6, kitZ - 1.2, kitZ + 1.2], // drum riser
+  ...[-1, 1].map((sx) => [sx * 6.5 - 0.6, sx * 6.5 + 0.6, STAGE.zc - 2.5 - 0.3, STAGE.zc - 2.5 + 0.3]), // amps
+  ...[-1, 1].map((sx) => [sx * 2.4 - 0.35, sx * 2.4 + 0.35, STAGE.zc + 3 - 0.22, STAGE.zc + 3 + 0.22]), // monitor wedges
+];
+const BOUNDS = { x: STAGE.w / 2 - 0.4, zMin: STAGE.zc - STAGE.d / 2 + 0.5, zMax: STAGE.zc + STAGE.d / 2 - 0.5 };
+
+function blocked(x, z) {
+  if (Math.abs(x) > BOUNDS.x || z < BOUNDS.zMin || z > BOUNDS.zMax) return true;
+  if (obstacles.some(([x0, x1, z0, z1]) => x > x0 - PLAYER_RADIUS && x < x1 + PLAYER_RADIUS && z > z0 - PLAYER_RADIUS && z < z1 + PLAYER_RADIUS)) return true;
+  return Math.hypot(x - woman.position.x, z - woman.position.z) < 0.4 + PLAYER_RADIUS;
+}
+
+const _playEuler = new THREE.Euler();
+function updatePlay(dt, t) {
+  const k = play.keys;
+  let ix = play.moveX, iy = play.moveY; // joystick axes: x right, y forward
+  if (k.has('KeyW') || k.has('ArrowUp')) iy += 1;
+  if (k.has('KeyS') || k.has('ArrowDown')) iy -= 1;
+  if (k.has('KeyD')) ix += 1;
+  if (k.has('KeyA')) ix -= 1;
+  if (k.has('ArrowLeft')) play.heading += 1.8 * dt;
+  if (k.has('ArrowRight')) play.heading -= 1.8 * dt;
+
+  const len = Math.hypot(ix, iy);
+  if (len > 1) { ix /= len; iy /= len; }
+  const running = k.has('ShiftLeft') || k.has('ShiftRight');
+  const speed = running ? 4.5 : 2.5; // m/s
+  // The model faces +z at heading 0: forward = (sin, cos), right = (-cos, sin)
+  const sin = Math.sin(play.heading), cos = Math.cos(play.heading);
+  const vx = (sin * iy - cos * ix) * speed, vz = (cos * iy + sin * ix) * speed;
+
+  // Move one axis at a time so the player slides along walls and props
+  const nx = human.position.x + vx * dt;
+  if (!blocked(nx, human.position.z)) human.position.x = nx;
+  const nz = human.position.z + vz * dt;
+  if (!blocked(human.position.x, nz)) human.position.z = nz;
+  human.rotation.y = play.heading;
+
+  // Walk cycle: swing legs and arms, easing in and out of it
+  const moving = Math.min(len, 1);
+  play.swingAmp += (moving - play.swingAmp) * (1 - Math.exp(-10 * dt));
+  play.walkPhase += dt * (running ? 9 : 6) * moving;
+  const swing = Math.sin(play.walkPhase) * 0.6 * play.swingAmp;
+  const { armL, armR, legL, legR } = human.userData;
+  legL.rotation.x = swing; legR.rotation.x = -swing;
+  armL.rotation.x = -swing * 0.7 + Math.sin(t * 1.2) * 0.05 * (1 - play.swingAmp);
+  armR.rotation.x = swing * 0.7 - Math.sin(t * 1.2) * 0.05 * (1 - play.swingAmp);
+
+  // First-person camera at eye height, slightly ahead of the (hidden) head, with a little head bob
+  const bob = Math.abs(Math.sin(play.walkPhase)) * 0.03 * play.swingAmp;
+  camera.position.set(human.position.x + sin * 0.1, human.position.y + EYE_HEIGHT + bob, human.position.z + cos * 0.1);
+  camera.quaternion.setFromEuler(_playEuler.set(play.pitch, play.heading + Math.PI, 0, 'YXZ')); // camera looks down its own -z
+}
+
+function lookBy(dx, dy, sensitivity) {
+  play.heading -= dx * sensitivity;
+  play.pitch = THREE.MathUtils.clamp(play.pitch - dy * sensitivity, -1.4, 1.4);
+}
+
+// Keyboard
+window.addEventListener('keydown', (e) => {
+  if (!play.active) return;
+  play.keys.add(e.code);
+  if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
+});
+window.addEventListener('keyup', (e) => play.keys.delete(e.code));
+window.addEventListener('blur', () => play.keys.clear());
+
+// Mouse look (pointer lock) and touch / mouse drag look
+renderer.domElement.addEventListener('click', () => {
+  if (play.active && !COARSE && renderer.domElement.requestPointerLock) renderer.domElement.requestPointerLock();
+});
+document.addEventListener('mousemove', (e) => {
+  if (play.active && document.pointerLockElement === renderer.domElement) lookBy(e.movementX, e.movementY, 0.0022);
+});
+let lookPointer = null;
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  if (play.active && !document.pointerLockElement) lookPointer = { id: e.pointerId, x: e.clientX, y: e.clientY };
+});
+window.addEventListener('pointermove', (e) => {
+  if (!play.active || !lookPointer || e.pointerId !== lookPointer.id) return;
+  lookBy(e.clientX - lookPointer.x, e.clientY - lookPointer.y, 0.004);
+  lookPointer.x = e.clientX; lookPointer.y = e.clientY;
+});
+for (const type of ['pointerup', 'pointercancel']) {
+  window.addEventListener(type, (e) => { if (lookPointer && e.pointerId === lookPointer.id) lookPointer = null; });
+}
+
+// On-screen joystick (touch devices)
+const stick = document.createElement('div');
+Object.assign(stick.style, {
+  position: 'fixed', left: '24px', bottom: '24px', width: '130px', height: '130px', borderRadius: '50%',
+  background: 'rgba(255,255,255,0.12)', border: '2px solid rgba(255,255,255,0.5)', touchAction: 'none', zIndex: '999', display: 'none',
+});
+const knob = document.createElement('div');
+Object.assign(knob.style, { position: 'absolute', left: '40px', top: '40px', width: '50px', height: '50px', borderRadius: '50%', background: 'rgba(255,255,255,0.6)' });
+stick.appendChild(knob);
+document.body.appendChild(stick);
+
+const STICK_RADIUS = 40;
+let stickPointer = null;
+function moveStick(e) {
+  const r = stick.getBoundingClientRect();
+  let dx = e.clientX - (r.left + r.width / 2), dy = e.clientY - (r.top + r.height / 2);
+  const d = Math.hypot(dx, dy);
+  if (d > STICK_RADIUS) { dx *= STICK_RADIUS / d; dy *= STICK_RADIUS / d; }
+  knob.style.transform = `translate(${dx}px, ${dy}px)`;
+  play.moveX = dx / STICK_RADIUS;
+  play.moveY = -dy / STICK_RADIUS;
+}
+stick.addEventListener('pointerdown', (e) => {
+  stickPointer = e.pointerId;
+  try { stick.setPointerCapture(e.pointerId); } catch (err) { /* synthetic or already-released pointer */ }
+  moveStick(e);
+});
+window.addEventListener('pointermove', (e) => { if (e.pointerId === stickPointer) moveStick(e); });
+for (const type of ['pointerup', 'pointercancel']) {
+  window.addEventListener(type, (e) => {
+    if (e.pointerId !== stickPointer) return;
+    stickPointer = null;
+    knob.style.transform = '';
+    play.moveX = play.moveY = 0;
+  });
+}
+
+const hint = document.createElement('div');
+hint.textContent = COARSE ? 'Left stick: move  ·  Drag to look' : 'WASD: move  ·  Shift: run  ·  Mouse: look (click to capture)  ·  Esc: release mouse';
+Object.assign(hint.style, {
+  position: 'fixed', bottom: '12px', left: '50%', transform: 'translateX(-50%)', padding: '6px 12px', borderRadius: '4px',
+  background: 'rgba(0,0,0,0.5)', color: '#fff', font: '13px sans-serif', zIndex: '999', display: 'none', pointerEvents: 'none', whiteSpace: 'nowrap',
+});
+document.body.appendChild(hint);
+
+function startPlay() {
+  stopPhone();
+  Object.assign(play, { active: true, heading: human.rotation.y, pitch: 0, moveX: 0, moveY: 0, walkPhase: 0, swingAmp: 0 });
+  controls.enabled = false;
+  for (const part of human.userData.headParts) part.visible = false; // we're looking out of the head
+  stick.style.display = COARSE ? '' : 'none';
+  hint.style.display = '';
+  refreshPhoneUI();
+}
+
+function stopPlay() {
+  if (!play.active) return;
+  play.active = false;
+  play.keys.clear();
+  play.moveX = play.moveY = 0;
+  if (document.pointerLockElement) document.exitPointerLock();
+  for (const part of human.userData.headParts) part.visible = true;
+  const { legL, legR } = human.userData;
+  legL.rotation.x = legR.rotation.x = 0;
+  stick.style.display = hint.style.display = 'none';
+  controls.enabled = true;
+  camera.position.set(0, 3.2, 4);
+  controls.update(); // back to the orbit overview
+  refreshPhoneUI();
+}
+
+window.__game = { play, human }; // debug/test hook
+
+const phoneUI = document.createElement('div');
+Object.assign(phoneUI.style, { position: 'fixed', top: '12px', left: '12px', display: 'flex', gap: '8px', zIndex: '999' });
+function phoneButton(label, onClick) {
+  const b = document.createElement('button');
+  b.textContent = label;
+  Object.assign(b.style, { padding: '10px 14px', border: '1px solid #fff', borderRadius: '4px', background: 'rgba(0,0,0,0.5)', color: '#fff', font: '13px sans-serif', cursor: 'pointer' });
+  b.addEventListener('click', onClick);
+  phoneUI.appendChild(b);
+  return b;
+}
+const playBtn = phoneButton('Play as blue hair', startPlay);
+const lookBtn = phoneButton('Look around (phone)', startPhone);
+const cardboardBtn = phoneButton('Cardboard', () => setStereo(!phone.stereo));
+const exitBtn = phoneButton('Exit', () => { stopPhone(); stopPlay(); });
+function refreshPhoneUI() {
+  const idle = !phone.active && !play.active;
+  playBtn.style.display = idle ? '' : 'none';
+  lookBtn.style.display = idle && navigator.maxTouchPoints > 0 ? '' : 'none'; // gyro look-around: phones and tablets only
+  cardboardBtn.style.display = phone.active ? '' : 'none';
+  exitBtn.style.display = idle ? 'none' : '';
+  vrButton.style.display = idle ? '' : 'none';
+}
+refreshPhoneUI();
+document.body.appendChild(phoneUI);
+renderer.xr.addEventListener('sessionstart', () => { stopPhone(); stopPlay(); phoneUI.style.display = 'none'; });
+renderer.xr.addEventListener('sessionend', () => { phoneUI.style.display = 'flex'; });
+
 // ---------- Resize + render loop ----------
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  stereoEffect.setSize(window.innerWidth, window.innerHeight);
 });
 
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  const t = clock.getElapsedTime();
+  const dt = Math.min(clock.getDelta(), 0.1);
+  const t = clock.elapsedTime;
   // Subtle idle sway
   for (const [person, phase] of [[human, 0], [woman, 1.5]]) {
+    if (play.active && person === human) continue; // driven by the walk cycle
     person.userData.armL.rotation.x = Math.sin(t * 1.2 + phase) * 0.05;
     person.userData.armR.rotation.x = -Math.sin(t * 1.2 + phase) * 0.05;
   }
   updateVenue(t);
-  renderer.render(scene, camera);
+  if (play.active) updatePlay(dt, t);
+  if (phone.active) updatePhoneCamera();
+  if (phone.active && phone.stereo) stereoEffect.render(scene, camera);
+  else renderer.render(scene, camera);
 });
 </script>
 </body>
