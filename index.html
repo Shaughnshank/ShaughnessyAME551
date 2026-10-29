@@ -34,43 +34,397 @@ document.body.appendChild(renderer.domElement);
 document.body.appendChild(VRButton.createButton(renderer));
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x1a1f2b);
-scene.fog = new THREE.Fog(0x1a1f2b, 8, 30);
 
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 100);
-camera.position.set(0, 1.6, 3);
+camera.position.set(0, 3.2, 4);
 
 // Everything the player "stands in" lives under the rig; move the rig to move the player in VR.
 const rig = new THREE.Group();
 rig.add(camera);
 scene.add(rig);
 
+// In VR the player starts center stage, facing the crowd (rig faces -z by default, so turn it around).
+// Applied only while a session is active so the desktop orbit camera keeps working in world space.
+renderer.xr.addEventListener('sessionstart', () => {
+  rig.position.set(0, STAGE.h, STAGE.zc + STAGE.d / 2 - 1.8);
+  rig.rotation.y = Math.PI;
+});
+renderer.xr.addEventListener('sessionend', () => {
+  rig.position.set(0, 0, 0);
+  rig.rotation.y = 0;
+});
+
 // Desktop fallback (mouse orbit); ignored while in an XR session.
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, 1.2, 0);
+controls.target.set(0, 2.5, -13);
 controls.update();
 
-// ---------- Lighting ----------
-scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x222233, 0.8));
-const sun = new THREE.DirectionalLight(0xffffff, 1.5);
-sun.position.set(4, 8, 3);
-sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
-Object.assign(sun.shadow.camera, { left: -8, right: 8, top: 8, bottom: -8 });
-scene.add(sun);
+// ---------- Concert venue ----------
+// Layout (meters): the stage is at -z, facing +z toward the crowd; balconies wrap the sides and rear. The VR player starts on stage (see sessionstart).
+const ROOM = { x0: -17, x1: 17, z0: -17.5, z1: 22, h: 14 };
+const STAGE = { w: 18, d: 8, h: 1.2, zc: -13 }; // front edge at z = -9
+const DECK_Y = 4.5;
 
-// ---------- Environment ----------
-const floor = new THREE.Mesh(
-  new THREE.CircleGeometry(15, 64),
-  new THREE.MeshStandardMaterial({ color: 0x2c3447, roughness: 0.9 })
-);
-floor.rotation.x = -Math.PI / 2;
-floor.receiveShadow = true;
-scene.add(floor);
+scene.background = new THREE.Color(0x07060b);
+scene.fog = new THREE.FogExp2(0x0a0812, 0.012);
 
-const grid = new THREE.GridHelper(30, 30, 0x5577aa, 0x334466);
-grid.position.y = 0.002;
-scene.add(grid);
+function box(w, h, d, color, x, y, z, { parent = scene, emissive = 0, roughness = 0.6, metalness = 0.1, shadow = false } = {}) {
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(w, h, d),
+    new THREE.MeshStandardMaterial({ color, roughness, metalness, emissive: color, emissiveIntensity: emissive })
+  );
+  mesh.position.set(x, y, z);
+  mesh.castShadow = shadow;
+  mesh.receiveShadow = true;
+  parent.add(mesh);
+  return mesh;
+}
+const glow = (w, h, d, color, x, y, z, parent = scene) => {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshBasicMaterial({ color }));
+  mesh.position.set(x, y, z);
+  parent.add(mesh);
+  return mesh;
+};
+
+// Lighting: dim ambient + a shadow-casting spot on the performers + colored fill over the crowd
+scene.add(new THREE.HemisphereLight(0x6a6aa0, 0x201018, 0.6));
+
+const keyLight = new THREE.SpotLight(0xfff2e0, 400, 0, 0.45, 0.6, 2);
+keyLight.position.set(0, 10, -5);
+keyLight.target.position.set(0, 1.4, STAGE.zc);
+keyLight.castShadow = true;
+keyLight.shadow.mapSize.set(1024, 1024);
+scene.add(keyLight, keyLight.target);
+
+const fillPink = new THREE.PointLight(0xff3dcb, 250, 45, 2);
+fillPink.position.set(-9, 8, -2);
+const fillBlue = new THREE.PointLight(0x3d6bff, 250, 45, 2);
+fillBlue.position.set(9, 8, -2);
+scene.add(fillPink, fillBlue);
+
+// Room shell: one inside-out box (+x, -x, ceiling, floor, +z, -z)
+const wallMat = new THREE.MeshStandardMaterial({ color: 0x4a1f1c, roughness: 0.9, side: THREE.BackSide });
+const roomW = ROOM.x1 - ROOM.x0, roomD = ROOM.z1 - ROOM.z0;
+const room = new THREE.Mesh(new THREE.BoxGeometry(roomW, ROOM.h, roomD), [
+  wallMat, wallMat,
+  new THREE.MeshStandardMaterial({ color: 0x1b1620, roughness: 1, side: THREE.BackSide }),
+  new THREE.MeshStandardMaterial({ color: 0x15141a, roughness: 0.55, side: THREE.BackSide }),
+  wallMat, wallMat,
+]);
+room.position.set(0, ROOM.h / 2, (ROOM.z0 + ROOM.z1) / 2);
+room.receiveShadow = true;
+scene.add(room);
+
+// Ceiling beams and wall trim (gold)
+const GOLD = 0x8a6a2a;
+for (let z = ROOM.z0 + 3; z < ROOM.z1; z += 4) box(roomW, 0.4, 0.35, GOLD, 0, ROOM.h - 0.2, z, { roughness: 0.4, metalness: 0.5 });
+for (const sx of [-1, 1]) {
+  box(0.2, 0.3, roomD, GOLD, sx * (ROOM.x1 - 0.1), 11, (ROOM.z0 + ROOM.z1) / 2, { roughness: 0.4, metalness: 0.5 });
+
+  // Arched stained-glass windows above the balconies
+  for (let z = -11; z < 20; z += 5.6) {
+    const win = new THREE.Group();
+    win.position.set(sx * (ROOM.x1 - 0.06), 8.5, z);
+    win.rotation.y = -sx * Math.PI / 2;
+    const glass = new THREE.MeshBasicMaterial({ color: 0x3a4496 });
+    win.add(new THREE.Mesh(new THREE.PlaneGeometry(2.2, 4), glass));
+    const arch = new THREE.Mesh(new THREE.CircleGeometry(1.1, 24, 0, Math.PI), glass);
+    arch.position.y = 2;
+    win.add(arch);
+    scene.add(win);
+  }
+}
+
+// Balconies: deck, ornate fascia, rail, columns
+const columns = [];
+function balcony(x0, x1, z0, z1, frontAxis, frontPos) {
+  const w = x1 - x0, d = z1 - z0, cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
+  box(w, 0.3, d, 0x2a2024, cx, DECK_Y, cz);
+  // fascia / rail run along the edge that faces the floor
+  const fw = frontAxis === 'x' ? 0.3 : w, fd = frontAxis === 'x' ? d : 0.3;
+  const fx = frontAxis === 'x' ? frontPos : cx, fz = frontAxis === 'z' ? frontPos : cz;
+  box(fw, 1.0, fd, 0xd9c9a0, fx, DECK_Y - 0.35, fz, { roughness: 0.5 });
+  box(fw, 0.12, fd, 0xb08a3a, fx, DECK_Y - 0.9, fz, { roughness: 0.4, metalness: 0.5 });
+  box(fw + 0.05, 0.9, fd + 0.05, 0xd9c9a0, fx, DECK_Y + 0.6, fz, { roughness: 0.5 });
+  box(fw + 0.1, 0.1, fd + 0.1, 0xb08a3a, fx, DECK_Y + 1.1, fz, { roughness: 0.4, metalness: 0.5 });
+  // columns under the front edge
+  const n = Math.floor((frontAxis === 'x' ? d : w) / 7) + 1;
+  for (let i = 0; i < n; i++) {
+    const t = n === 1 ? 0.5 : i / (n - 1);
+    const px = frontAxis === 'x' ? frontPos : x0 + 2 + t * (w - 4);
+    const pz = frontAxis === 'z' ? frontPos : z0 + 1 + t * (d - 2);
+    const col = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.2, DECK_Y - 0.2, 12), new THREE.MeshStandardMaterial({ color: GOLD, roughness: 0.4, metalness: 0.5 }));
+    col.position.set(px, (DECK_Y - 0.2) / 2, pz);
+    scene.add(col);
+    columns.push({ x: px, z: pz });
+  }
+}
+balcony(ROOM.x0, -11.5, -8, 16.5, 'x', -11.5);  // left
+balcony(11.5, ROOM.x1, -8, 16.5, 'x', 11.5);    // right
+balcony(ROOM.x0, ROOM.x1, 16.5, ROOM.z1, 'z', 16.5); // rear
+
+// ----- Stage -----
+box(STAGE.w, STAGE.h, STAGE.d, 0x18161d, 0, STAGE.h / 2, STAGE.zc);
+
+const checker = document.createElement('canvas');
+checker.width = checker.height = 2;
+const cc = checker.getContext('2d');
+cc.fillStyle = '#c8c8d0'; cc.fillRect(0, 0, 2, 2);
+cc.fillStyle = '#0c0c10'; cc.fillRect(0, 0, 1, 1); cc.fillRect(1, 1, 1, 1);
+const checkerTex = new THREE.CanvasTexture(checker);
+checkerTex.magFilter = THREE.NearestFilter;
+checkerTex.wrapS = checkerTex.wrapT = THREE.RepeatWrapping;
+checkerTex.repeat.set(STAGE.w / 2, STAGE.d / 2); // 1m squares
+checkerTex.colorSpace = THREE.SRGBColorSpace;
+const stageTop = new THREE.Mesh(new THREE.PlaneGeometry(STAGE.w, STAGE.d), new THREE.MeshStandardMaterial({ map: checkerTex, roughness: 0.35 }));
+stageTop.rotation.x = -Math.PI / 2;
+stageTop.position.set(0, STAGE.h + 0.002, STAGE.zc);
+stageTop.receiveShadow = true;
+scene.add(stageTop);
+
+const stageEdge = glow(STAGE.w, 0.08, 0.05, 0xff3dcb, 0, STAGE.h - 0.15, STAGE.zc + STAGE.d / 2 + 0.03);
+
+// Barrier between stage and crowd
+box(STAGE.w, 0.08, 0.08, 0xb8bcc8, 0, 1.1, STAGE.zc + STAGE.d / 2 + 0.6, { roughness: 0.3, metalness: 0.8 });
+for (let x = -STAGE.w / 2; x <= STAGE.w / 2; x += 1.5)
+  box(0.06, 1.1, 0.06, 0xb8bcc8, x, 0.55, STAGE.zc + STAGE.d / 2 + 0.6, { roughness: 0.3, metalness: 0.8 });
+
+// Drum kit on a riser
+const kitZ = STAGE.zc - 2.4;
+box(3.2, 0.3, 2.4, 0x25222c, 0, STAGE.h + 0.15, kitZ);
+const kit = new THREE.Group();
+kit.position.set(0, STAGE.h + 0.3, kitZ);
+scene.add(kit);
+const drumMat = new THREE.MeshStandardMaterial({ color: 0xb01830, roughness: 0.3 });
+const brass = new THREE.MeshStandardMaterial({ color: 0xd4af37, roughness: 0.25, metalness: 0.8 });
+function drum(r, h, x, y, z, rotX = 0) {
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 20), drumMat);
+  m.position.set(x, y, z);
+  m.rotation.x = rotX;
+  m.castShadow = true;
+  kit.add(m);
+}
+drum(0.32, 0.4, 0, 0.35, 0.1, Math.PI / 2);   // kick
+drum(0.17, 0.2, -0.3, 0.85, 0.4);              // toms
+drum(0.19, 0.22, 0.3, 0.85, 0.4);
+drum(0.2, 0.24, 0.7, 0.45, 0.5);               // floor tom
+drum(0.18, 0.12, -0.55, 0.6, 0.55);            // snare
+for (const [x, y, z, r] of [[-0.9, 1.25, 0.2, 0.22], [0.9, 1.3, 0.1, 0.25], [-0.9, 0.95, 0.65, 0.16]]) {
+  const cym = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 0.01, 20), brass);
+  cym.position.set(x, y, z);
+  kit.add(cym);
+  const stand = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.01, y, 6), brass);
+  stand.position.set(x, y / 2, z);
+  kit.add(stand);
+}
+
+// Amps, monitor wedges, mic stands
+for (const sx of [-1, 1]) {
+  box(1.2, 1.6, 0.6, 0x111114, sx * 6.5, STAGE.h + 0.8, STAGE.zc - 2.5, { shadow: true });
+  box(1.0, 1.2, 0.05, 0x2a2a30, sx * 6.5, STAGE.h + 0.8, STAGE.zc - 2.17, { roughness: 1 });
+  box(0.7, 0.35, 0.45, 0x111114, sx * 2.4, STAGE.h + 0.18, STAGE.zc + 3);
+}
+for (const x of [-0.9, 0.9]) {
+  box(0.015, 1.5, 0.015, 0x888888, x + 0.1, STAGE.h + 0.75, STAGE.zc + 0.5, { metalness: 0.8 });
+  box(0.04, 0.04, 0.12, 0x222222, x + 0.1, STAGE.h + 1.5, STAGE.zc + 0.45);
+}
+
+// Hanging speaker line arrays
+for (const sx of [-1, 1]) {
+  box(1.2, 5.5, 1.2, 0x0c0c10, sx * 11, 7.8, -9.5, { roughness: 0.8 });
+  for (let i = 0; i < 8; i++) box(1.05, 0.05, 0.02, 0x30303a, sx * 11, 5.4 + i * 0.65, -8.88);
+}
+
+// ----- LED screens (canvas-textured, animated) -----
+function makeScreen(w, h, px, py, pz, rotY) {
+  const canvas = document.createElement('canvas');
+  canvas.width = w * 40; canvas.height = h * 40;
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: tex, toneMapped: false, fog: false }));
+  mesh.position.set(px, py, pz);
+  mesh.rotation.y = rotY;
+  scene.add(mesh);
+  box(w + 0.3, h + 0.3, 0.1, 0x0a0a0c, 0, 0, -0.07, { parent: mesh }); // frame
+  return { ctx: canvas.getContext('2d'), canvas, tex };
+}
+const screenZ = STAGE.zc - STAGE.d / 2 - 0.4;
+const mainScreen = makeScreen(10, 5.6, 0, 5.6, screenZ, 0);
+const leftScreen = makeScreen(3.6, 6.4, -7.4, 5.4, screenZ + 0.6, 0.3);
+const rightScreen = makeScreen(3.6, 6.4, 7.4, 5.4, screenZ + 0.6, -0.3);
+for (let i = 0; i < 11; i++) glow(0.35, 0.18, 0.1, 0xffffff, -5 + i, 8.6, screenZ + 0.1);
+
+function drawPlasma(s, t) {
+  const { ctx, canvas: c } = s;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = 'rgba(12,0,30,0.45)';
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < 6; i++) {
+    const x = c.width * (0.5 + 0.4 * Math.sin(t * 0.7 + i * 1.3));
+    const y = c.height * (0.5 + 0.4 * Math.cos(t * 0.9 + i * 2.1));
+    const g = ctx.createRadialGradient(x, y, 0, x, y, c.height * 0.55);
+    const hue = (t * 30 + i * 60) % 360;
+    g.addColorStop(0, `hsla(${hue},100%,50%,0.3)`);
+    g.addColorStop(1, `hsla(${hue},100%,50%,0)`);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, c.width, c.height);
+  }
+  s.tex.needsUpdate = true;
+}
+function drawBars(s, t, hueShift) {
+  const { ctx, canvas: c } = s;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = '#05010f';
+  ctx.fillRect(0, 0, c.width, c.height);
+  const n = 10, bw = c.width / n;
+  for (let i = 0; i < n; i++) {
+    const level = 0.25 + 0.7 * Math.abs(Math.sin(t * 3 + i * 0.9) * Math.cos(t * 1.7 + i));
+    ctx.fillStyle = `hsl(${(hueShift + i * 14 + t * 20) % 360},100%,55%)`;
+    ctx.fillRect(i * bw + 3, c.height * (1 - level), bw - 6, c.height * level);
+  }
+  s.tex.needsUpdate = true;
+}
+
+// ----- Lighting rig: trusses with moving-head fixtures and visible beams -----
+const trussMat = new THREE.MeshStandardMaterial({ color: 0x555a66, roughness: 0.4, metalness: 0.4 });
+function truss(length, y, z) {
+  for (const dy of [-0.22, 0.22]) {
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(length, 0.08, 0.08), trussMat);
+    bar.position.set(0, y + dy, z);
+    scene.add(bar);
+  }
+  for (let x = -length / 2; x <= length / 2; x += 0.5) {
+    const web = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.5, 0.04), trussMat);
+    web.position.set(x, y, z);
+    scene.add(web);
+  }
+}
+truss(22, 9, STAGE.zc);
+truss(26, 10, -5);
+truss(22, 9, 6);
+
+const BEAM_LEN = 14;
+const beamGeo = new THREE.ConeGeometry(1.4, BEAM_LEN, 20, 1, true);
+beamGeo.translate(0, -BEAM_LEN / 2, 0); // apex at the fixture, opening downward
+const lamps = [];
+function addLamp(x, y, z, i) {
+  const pivot = new THREE.Group();
+  pivot.position.set(x, y - 0.35, z);
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.22, 0.4, 12), new THREE.MeshStandardMaterial({ color: 0x0c0c10 }));
+  body.position.y = -0.05;
+  pivot.add(body);
+  const beamMat = new THREE.MeshBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: 0.1, blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+  });
+  pivot.add(new THREE.Mesh(beamGeo, beamMat));
+  scene.add(pivot);
+  lamps.push({ pivot, beamMat, phase: i * 0.9, hue: (i * 0.13) % 1 });
+}
+let lampIndex = 0;
+for (let x = -9; x <= 9; x += 2.25) addLamp(x, 9, STAGE.zc, lampIndex++);
+for (let x = -12; x <= 12; x += 3) addLamp(x, 10, -5, lampIndex++);
+for (let x = -9; x <= 9; x += 4.5) addLamp(x, 9, 6, lampIndex++);
+
+// Sound desk in the middle of the floor
+box(5, 1, 1.8, 0x15141a, 0, 0.5, 11.75, { shadow: true });
+box(4.4, 0.05, 1.2, 0x2b2b44, 0, 1.02, 11.6, { emissive: 0.6, roughness: 0.4 });
+for (let i = 0; i < 12; i++) glow(0.1, 0.02, 0.1, i % 3 ? 0x4dff88 : 0xff4d4d, -2 + i * 0.36, 1.06, 11.6);
+
+// ----- Crowd (instanced: body + head + hair, plus raised arms) -----
+let seed = 1234567;
+const rand = () => { seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+const pick = (arr) => arr[Math.floor(rand() * arr.length)];
+
+const crowd = [];
+function fillCrowd(x0, x1, z0, z1, y, spacing, skip) {
+  for (let x = x0; x <= x1; x += spacing) {
+    for (let z = z0; z <= z1; z += spacing) {
+      const px = x + (rand() - 0.5) * spacing * 0.6, pz = z + (rand() - 0.5) * spacing * 0.6;
+      if (skip(px, pz)) continue;
+      crowd.push({
+        x: px, y, z: pz,
+        s: 0.9 + rand() * 0.18, w: 0.75 + rand() * 0.2,
+        phase: rand() * Math.PI * 2, speed: 3 + rand() * 2,
+        raised: rand() < 0.3,
+        yaw: Math.atan2(px, pz - STAGE.zc), // local -z faces the stage
+      });
+    }
+  }
+}
+const floorSkip = (x, z) =>
+  (Math.abs(x) < 3.2 && z > 10 && z < 13.6) || // sound desk
+  columns.some((c) => Math.hypot(c.x - x, c.z - z) < 0.5);
+const balconySkip = (x, z) => columns.some((c) => Math.hypot(c.x - x, c.z - z) < 0.3);
+fillCrowd(-16, 16, STAGE.zc + STAGE.d / 2 + 1.2, 21, 0, 0.85, floorSkip);
+fillCrowd(-16.2, -12.8, -7.5, 16, DECK_Y + 0.15, 0.9, balconySkip);
+fillCrowd(12.8, 16.2, -7.5, 16, DECK_Y + 0.15, 0.9, balconySkip);
+fillCrowd(-16, 16, 17.4, 21.4, DECK_Y + 0.15, 0.9, balconySkip);
+
+const shirtColors = [0xf2efe6, 0x222222, 0x8a2be2, 0x2e86de, 0xe74c3c, 0x27ae60, 0xf1c40f, 0xd35400, 0x7f8c8d, 0xe84393].map((c) => new THREE.Color(c));
+const skinColors = [0xf1c27d, 0xe0ac69, 0xc68642, 0x8d5524, 0xffdbac, 0x5c3a21].map((c) => new THREE.Color(c));
+const hairColors = [0x2b1d12, 0x090806, 0x6a4a2a, 0xd9b36b, 0xa0522d, 0x8c8c8c].map((c) => new THREE.Color(c));
+
+const N = crowd.length;
+const white = new THREE.MeshStandardMaterial({ roughness: 0.8 });
+const bodies = new THREE.InstancedMesh(new THREE.CapsuleGeometry(0.2, 1.0, 3, 8), white, N);
+const heads = new THREE.InstancedMesh(new THREE.SphereGeometry(0.115, 8, 6), white, N);
+const hairs = new THREE.InstancedMesh(new THREE.SphereGeometry(0.125, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.55), white, N);
+const arms = new THREE.InstancedMesh(new THREE.CapsuleGeometry(0.04, 0.45, 2, 6), white, crowd.filter((p) => p.raised).length * 2);
+let armIdx = 0;
+crowd.forEach((p, i) => {
+  bodies.setColorAt(i, pick(shirtColors));
+  const skin = pick(skinColors);
+  heads.setColorAt(i, skin);
+  hairs.setColorAt(i, pick(hairColors));
+  if (p.raised) { arms.setColorAt(armIdx++, skin); arms.setColorAt(armIdx++, skin); }
+});
+for (const m of [bodies, heads, hairs, arms]) {
+  m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  m.frustumCulled = false;
+  scene.add(m);
+}
+
+const _q = new THREE.Quaternion(), _p = new THREE.Vector3(), _s = new THREE.Vector3(), _up = new THREE.Vector3(0, 1, 0);
+const _base = new THREE.Matrix4(), _m = new THREE.Matrix4(), _t1 = new THREE.Matrix4(), _t2 = new THREE.Matrix4();
+function updateCrowd(t) {
+  let a = 0;
+  for (let i = 0; i < N; i++) {
+    const p = crowd[i];
+    const bob = Math.abs(Math.sin(t * p.speed + p.phase)) * 0.06;
+    _q.setFromAxisAngle(_up, p.yaw);
+    _p.set(p.x, p.y + bob, p.z);
+    _base.compose(_p, _q, _s.set(p.w, p.s, p.w));
+    bodies.setMatrixAt(i, _m.copy(_base).multiply(_t1.makeTranslation(0, 0.72, 0)));
+    heads.setMatrixAt(i, _m.copy(_base).multiply(_t1.makeTranslation(0, 1.55, 0)));
+    hairs.setMatrixAt(i, _m.copy(_base).multiply(_t1.makeTranslation(0, 1.57, 0.01)));
+    if (p.raised) {
+      for (const side of [-1, 1]) {
+        const angle = -side * (0.35 + 0.25 * Math.sin(t * 5 + p.phase + side));
+        _m.copy(_base).multiply(_t1.makeTranslation(side * 0.22, 1.3, 0))
+          .multiply(_t2.makeRotationZ(angle)).multiply(_t1.makeTranslation(0, 0.3, 0));
+        arms.setMatrixAt(a++, _m);
+      }
+    }
+  }
+  for (const m of [bodies, heads, hairs, arms]) m.instanceMatrix.needsUpdate = true;
+}
+
+// Per-frame venue animation (screens, edge strip, beams, crowd)
+function updateVenue(t) {
+  drawPlasma(mainScreen, t);
+  drawBars(leftScreen, t, 280);
+  drawBars(rightScreen, t, 160);
+  stageEdge.material.color.setHSL((t * 0.1) % 1, 1, 0.55);
+  fillPink.intensity = 250 + Math.sin(t * 4) * 60;
+  fillBlue.intensity = 250 + Math.cos(t * 4) * 60;
+  for (const l of lamps) {
+    l.pivot.rotation.x = Math.sin(t * 0.8 + l.phase) * 0.55;
+    l.pivot.rotation.z = Math.cos(t * 0.6 + l.phase) * 0.55;
+    l.beamMat.color.setHSL((l.hue + t * 0.05) % 1, 1, 0.5);
+  }
+  updateCrowd(t);
+}
 
 // ---------- Interactive objects ----------
 const interactables = [];
@@ -88,9 +442,119 @@ function addShape(geometry, color, x, y, z) {
   return mesh;
 }
 
-const cube   = addShape(new THREE.BoxGeometry(0.4, 0.4, 0.4),          0xff5a5f, -1.0, 1.2, -1.5);
-const sphere = addShape(new THREE.SphereGeometry(0.25, 32, 16),        0x4ecdc4,  0.0, 1.4, -2.0);
-const torus  = addShape(new THREE.TorusKnotGeometry(0.2, 0.07, 100, 16), 0xffe66d,  1.0, 1.2, -1.5);
+
+// ---------- Human model (built from primitives, origin at feet) ----------
+// height is in meters (model is authored at 1.75m); longHair adds shoulder-length hair; width narrows the build.
+function createHuman({ skin = 0xe0ac86, tee = 0xf2efe6, jacket = 0x16120f, pants = 0x18181b, shoes = 0x111111,
+                       hair = 0x1e6fff, longHair = false, height = 1.75, width = 1 } = {}) {
+  const human = new THREE.Group();
+  const mat = (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.7 });
+
+  function part(geometry, color, x, y, z, parent = human) {
+    const mesh = new THREE.Mesh(geometry, mat(color));
+    mesh.position.set(x, y, z);
+    mesh.castShadow = true;
+    parent.add(mesh);
+    return mesh;
+  }
+
+  // Limbs are pivoted at the joint so they can be rotated (e.g. arm swing).
+  function limb(radius, length, color, x, y, z) {
+    const pivot = new THREE.Group();
+    pivot.position.set(x, y, z);
+    part(new THREE.CapsuleGeometry(radius, length - radius * 2, 4, 12), color, 0, -length / 2, 0, pivot);
+    human.add(pivot);
+    return pivot;
+  }
+
+  // Torso (white tee), neck, head
+  part(new THREE.CapsuleGeometry(0.17, 0.35, 4, 16), tee, 0, 1.2, 0).scale.z = 0.65;
+  part(new THREE.CylinderGeometry(0.05, 0.06, 0.1, 12), skin, 0, 1.52, 0);
+  const head = part(new THREE.SphereGeometry(0.11, 24, 16), skin, 0, 1.65, 0);
+  head.scale.set(0.9, 1.1, 1);
+  part(new THREE.SphereGeometry(0.115, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.55), hair, 0, 1.67, -0.01);
+  if (longHair) {
+    part(new THREE.CapsuleGeometry(0.11, 0.2, 4, 12), hair, 0, 1.52, -0.075).scale.set(1, 1, 0.55); // back
+    for (const side of [-1, 1]) part(new THREE.CapsuleGeometry(0.03, 0.14, 4, 8), hair, side * 0.11, 1.57, 0.0); // front locks
+  }
+
+  // Sunglasses
+  const glassesMat = new THREE.MeshStandardMaterial({ color: 0x050505, roughness: 0.15, metalness: 0.6 });
+  const glassesPart = (geo, x, y, z) => {
+    const m = new THREE.Mesh(geo, glassesMat);
+    m.position.set(x, y, z);
+    head.add(m);
+    return m;
+  };
+  // children of head inherit its (0.9, 1.1, 1) scale, so offsets below are in head-local units
+  for (const side of [-1, 1]) {
+    glassesPart(new THREE.BoxGeometry(0.085, 0.05, 0.012), side * 0.05, 0.015, 0.107);
+    glassesPart(new THREE.BoxGeometry(0.008, 0.008, 0.11), side * 0.105, 0.025, 0.05); // temple arm
+  }
+  glassesPart(new THREE.BoxGeometry(0.03, 0.01, 0.012), 0, 0.028, 0.107); // bridge
+
+  // Leather jacket: body, open front showing the tee, collar and lapels
+  const leather = new THREE.MeshStandardMaterial({ color: jacket, roughness: 0.35, metalness: 0.1 });
+  const jacketPart = (geo, x, y, z, rx = 0, rz = 0) => {
+    const m = new THREE.Mesh(geo, leather);
+    m.position.set(x, y, z);
+    m.rotation.set(rx, 0, rz);
+    m.castShadow = true;
+    human.add(m);
+    return m;
+  };
+  jacketPart(new THREE.CapsuleGeometry(0.19, 0.3, 4, 16), 0, 1.19, -0.005).scale.z = 0.68;
+  part(new THREE.BoxGeometry(0.1, 0.42, 0.012), tee, 0, 1.22, 0.138); // tee visible through the open front
+  jacketPart(new THREE.BoxGeometry(0.12, 0.3, 0.02), -0.07, 1.33, 0.145, 0, -0.2); // lapels
+  jacketPart(new THREE.BoxGeometry(0.12, 0.3, 0.02),  0.07, 1.33, 0.145, 0,  0.2);
+  jacketPart(new THREE.BoxGeometry(0.3, 0.05, 0.16), 0, 1.5, 0.0); // collar
+  for (const side of [-1, 1]) { // shoulder snaps
+    part(new THREE.SphereGeometry(0.01, 8, 6), 0xb8b8b8, side * 0.1, 1.46, 0.15);
+  }
+
+  // Arms (leather sleeves, shoulder pivots) with hands
+  const armL = limb(0.055, 0.62, jacket, -0.26, 1.46, 0);
+  const armR = limb(0.055, 0.62, jacket,  0.26, 1.46, 0);
+  for (const arm of [armL, armR]) {
+    arm.children[0].material = leather;
+    part(new THREE.SphereGeometry(0.045, 12, 8), skin, 0, -0.66, 0, arm);
+  }
+
+  // Waist / belt
+  part(new THREE.BoxGeometry(0.34, 0.2, 0.2), pants, 0, 0.9, 0);
+
+  // Legs (hip pivots) with feet
+  const legL = limb(0.07, 0.85, pants, -0.09, 0.88, 0);
+  const legR = limb(0.07, 0.85, pants,  0.09, 0.88, 0);
+  for (const leg of [legL, legR]) part(new THREE.BoxGeometry(0.1, 0.06, 0.24), shoes, 0, -0.85, 0.05, leg);
+
+  // Rips: thin patches of skin showing through the front of the jeans (w, h, y, x offset)
+  const rips = [
+    [legL, 0.06, 0.1, -0.47, 0],       // blown-out knee
+    [legL, 0.045, 0.012, -0.55, 0.01], // frayed slits below the knee
+    [legL, 0.04, 0.012, -0.6, -0.01],
+    [legL, 0.05, 0.015, -0.2, 0.015],  // thigh slit
+    [legR, 0.06, 0.09, -0.43, 0],      // knee
+    [legR, 0.05, 0.012, -0.33, -0.01],
+    [legR, 0.04, 0.012, -0.65, 0.01],  // shin slit
+  ];
+  for (const [leg, w, h, y, x] of rips) part(new THREE.BoxGeometry(w, h, 0.01), skin, x, y, 0.062, leg);
+
+  human.userData = { armL, armR, legL, legR };
+  human.scale.set(width * height / 1.75, height / 1.75, width * height / 1.75);
+  return human;
+}
+
+// The pair performs center stage, facing the crowd
+const human = createHuman();
+human.position.set(-0.9, STAGE.h, STAGE.zc);
+human.lookAt(human.position.x, STAGE.h, 3);
+scene.add(human);
+
+const woman = createHuman({ hair: 0xc4161c, longHair: true, height: 1.63, width: 0.92 });
+woman.position.set(0.9, STAGE.h, STAGE.zc);
+woman.lookAt(woman.position.x, STAGE.h, 3);
+scene.add(woman);
 
 // ---------- Controllers ----------
 const raycaster = new THREE.Raycaster();
@@ -145,9 +609,12 @@ window.addEventListener('resize', () => {
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const t = clock.getElapsedTime();
-  cube.rotation.set(t * 0.5, t * 0.7, 0);
-  sphere.position.y = 1.4 + Math.sin(t * 1.5) * 0.1;
-  torus.rotation.y = t;
+  // Subtle idle sway
+  for (const [person, phase] of [[human, 0], [woman, 1.5]]) {
+    person.userData.armL.rotation.x = Math.sin(t * 1.2 + phase) * 0.05;
+    person.userData.armR.rotation.x = -Math.sin(t * 1.2 + phase) * 0.05;
+  }
+  updateVenue(t);
   renderer.render(scene, camera);
 });
 </script>
