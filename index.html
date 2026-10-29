@@ -3,10 +3,153 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Simple Page</title>
+  <title>WebXR Starter Scene</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #111; }
+    canvas { display: block; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
 </head>
 <body>
-  <h1>Hello, World!</h1>
-  <p>This is a simple HTML page.</p>
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+
+// ---------- Renderer / scene / camera ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1f2b);
+scene.fog = new THREE.Fog(0x1a1f2b, 8, 30);
+
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 100);
+camera.position.set(0, 1.6, 3);
+
+// Everything the player "stands in" lives under the rig; move the rig to move the player in VR.
+const rig = new THREE.Group();
+rig.add(camera);
+scene.add(rig);
+
+// Desktop fallback (mouse orbit); ignored while in an XR session.
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 1.2, 0);
+controls.update();
+
+// ---------- Lighting ----------
+scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x222233, 0.8));
+const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+sun.position.set(4, 8, 3);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -8, right: 8, top: 8, bottom: -8 });
+scene.add(sun);
+
+// ---------- Environment ----------
+const floor = new THREE.Mesh(
+  new THREE.CircleGeometry(15, 64),
+  new THREE.MeshStandardMaterial({ color: 0x2c3447, roughness: 0.9 })
+);
+floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
+scene.add(floor);
+
+const grid = new THREE.GridHelper(30, 30, 0x5577aa, 0x334466);
+grid.position.y = 0.002;
+scene.add(grid);
+
+// ---------- Interactive objects ----------
+const interactables = [];
+
+function addShape(geometry, color, x, y, z) {
+  const mesh = new THREE.Mesh(
+    geometry,
+    new THREE.MeshStandardMaterial({ color, roughness: 0.4, metalness: 0.2 })
+  );
+  mesh.position.set(x, y, z);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+  interactables.push(mesh);
+  return mesh;
+}
+
+const cube   = addShape(new THREE.BoxGeometry(0.4, 0.4, 0.4),          0xff5a5f, -1.0, 1.2, -1.5);
+const sphere = addShape(new THREE.SphereGeometry(0.25, 32, 16),        0x4ecdc4,  0.0, 1.4, -2.0);
+const torus  = addShape(new THREE.TorusKnotGeometry(0.2, 0.07, 100, 16), 0xffe66d,  1.0, 1.2, -1.5);
+
+// ---------- Controllers ----------
+const raycaster = new THREE.Raycaster();
+const tempMatrix = new THREE.Matrix4();
+const modelFactory = new XRControllerModelFactory();
+
+function makeRayLine() {
+  const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -1)]);
+  const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffffff }));
+  line.scale.z = 5;
+  return line;
+}
+
+function onSelectStart(event) {
+  const controller = event.target;
+  tempMatrix.identity().extractRotation(controller.matrixWorld);
+  raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+  raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+
+  const hit = raycaster.intersectObjects(interactables, false)[0];
+  if (hit) hit.object.material.color.setHex(Math.random() * 0xffffff);
+}
+
+for (let i = 0; i < 2; i++) {
+  const controller = renderer.xr.getController(i);
+  controller.add(makeRayLine());
+  controller.addEventListener('selectstart', onSelectStart);
+  rig.add(controller);
+
+  const grip = renderer.xr.getControllerGrip(i);
+  grip.add(modelFactory.createControllerModel(grip));
+  rig.add(grip);
+}
+
+// Desktop click = same interaction as the VR trigger.
+const mouse = new THREE.Vector2();
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  if (renderer.xr.isPresenting) return;
+  mouse.set((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
+  raycaster.setFromCamera(mouse, camera);
+  const hit = raycaster.intersectObjects(interactables, false)[0];
+  if (hit) hit.object.material.color.setHex(Math.random() * 0xffffff);
+});
+
+// ---------- Resize + render loop ----------
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const t = clock.getElapsedTime();
+  cube.rotation.set(t * 0.5, t * 0.7, 0);
+  sphere.position.y = 1.4 + Math.sin(t * 1.5) * 0.1;
+  torus.rotation.y = t;
+  renderer.render(scene, camera);
+});
+</script>
 </body>
 </html>
